@@ -29,6 +29,9 @@ input double Lot_Size = 1;
 input double ATR_SL = 0.75;
 input double ATR_TP = 1.75;
 input double Max_SL = 10000;
+input int Max_Consecutive_Losses = 3;
+input int Cooldown_After_Loss_Minutes = 30;
+input int Min_Minutes_Between_Trades = 5;
 
 bool CanOpen = true;
 
@@ -97,7 +100,10 @@ int DayCurrent;
 int amountOfTrades = 0;
 double MarketPoint_size = MarketInfo(Symbol(),MODE_POINT);
 double MarketLot_size = MarketInfo(Symbol(),MODE_LOTSIZE);
-
+int consecutiveLosses = 0;
+datetime cooldownUntil = 0;
+datetime lastTradeOpenTime = 0;
+datetime lastHistoryCloseTime = 0;
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -108,6 +114,11 @@ int OnInit()
    MarketLot_size = MarketInfo(Symbol(),MODE_LOTSIZE);
    ArrayResize(tickBuffer, LastTickNumber);
    bufferSize = 0;
+   DayCurrent = Day();
+   consecutiveLosses = 0;
+   cooldownUntil = 0;
+   lastTradeOpenTime = 0;
+   lastHistoryCloseTime = 0;
 
 
   // if (K3_FALCON_FX == true)
@@ -125,6 +136,8 @@ void OnDeinit(const int reason){}
 
 void OnTick()
 {
+   UpdateClosedTradeStats();
+
    double atrSL = iATR(NULL,PERIOD_M1,4,1);
    //AvgTickSpace//
    double currentPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID); // Get the current price
@@ -141,7 +154,7 @@ void OnTick()
    double M15_ATR5vATR14 = M15_RatioATR5/M15_RatioATR14;
    
    
-   Comment(" "+"\nATR_Size:  "+NormalizeDouble(atrSL,2)+"   ||   M1_ATR5vATR14:  "+NormalizeDouble(M1_ATR5vATR14,2)+"   ||   M15_ATR5vATR14:  "+NormalizeDouble(M15_ATR5vATR14,2)+"   ||   TickSpeed15Sec:  "+NormalizeDouble(speedTick15Sec,2)+"   ||   AvgTickSpace:  "+NormalizeDouble(avgTickSpace,4)+"   ||   DeviationTickSpace:  "+NormalizeDouble(fastTickSpace,4));
+   Comment(" "+"\nATR_Size:  "+NormalizeDouble(atrSL,2)+"   ||   M1_ATR5vATR14:  "+NormalizeDouble(M1_ATR5vATR14,2)+"   ||   M15_ATR5vATR14:  "+NormalizeDouble(M15_ATR5vATR14,2)+"   ||   TickSpeed15Sec:  "+NormalizeDouble(speedTick15Sec,2)+"   ||   AvgTickSpace:  "+NormalizeDouble(avgTickSpace,4)+"   ||   DeviationTickSpace:  "+NormalizeDouble(fastTickSpace,4)+"   ||   LossStreak:  "+consecutiveLosses);
  
    total = OrdersTotal();
    numberOfTotalTrades();
@@ -178,7 +191,7 @@ void OnTick()
       }
       else
       {
-            if (CanOpen)
+            if (CanOpen && CanOpenNewTrade())
             {
                if (isFastLong_RSI())
                {
@@ -215,7 +228,7 @@ void OnTick()
          RefreshRates();
          int orderMagicNumber = OrderMagicNumber();
 
-         if (orderMagicNumber == Trade_Reference || OrderComment() == "")
+         if (orderMagicNumber == Trade_Reference)
          {
             if (OrderSymbol() == Symbol())
             {
@@ -258,6 +271,79 @@ void OnTick()
 
 }
 
+double ClampLotSize(double lots)
+{
+   double lotStep = MarketInfo(Symbol(), MODE_LOTSTEP);
+   double minLot = MarketInfo(Symbol(), MODE_MINLOT);
+   double maxLot = MarketInfo(Symbol(), MODE_MAXLOT);
+
+   if (lotStep <= 0)
+      lotStep = 0.01;
+
+   lots = MathFloor(lots / lotStep) * lotStep;
+   if (lots < minLot)
+      lots = minLot;
+   if (lots > maxLot)
+      lots = maxLot;
+
+   return NormalizeDouble(lots, 2);
+}
+
+double CalculateOrderLots()
+{
+   return ClampLotSize(Lot_Size);
+}
+
+void UpdateClosedTradeStats()
+{
+   int totalHistory = OrdersHistoryTotal();
+   if (totalHistory <= 0)
+      return;
+
+   datetime newestProcessed = lastHistoryCloseTime;
+
+   for (int i = totalHistory - 1; i >= 0; i--)
+   {
+      if (!OrderSelect(i, SELECT_BY_POS, MODE_HISTORY))
+         continue;
+
+      if (OrderSymbol() != Symbol() || OrderMagicNumber() != Trade_Reference)
+         continue;
+
+      datetime closeTime = OrderCloseTime();
+      if (closeTime <= lastHistoryCloseTime)
+         break;
+
+      double netProfit = OrderProfit() + OrderSwap() + OrderCommission();
+      if (netProfit < 0)
+      {
+         consecutiveLosses++;
+         if (consecutiveLosses >= Max_Consecutive_Losses)
+            cooldownUntil = TimeCurrent() + Cooldown_After_Loss_Minutes * 60;
+      }
+      else if (netProfit > 0)
+      {
+         consecutiveLosses = 0;
+      }
+
+      if (closeTime > newestProcessed)
+         newestProcessed = closeTime;
+   }
+
+   lastHistoryCloseTime = newestProcessed;
+}
+
+bool CanOpenNewTrade()
+{
+   if (cooldownUntil > TimeCurrent())
+      return false;
+
+   if (lastTradeOpenTime > 0 && (TimeCurrent() - lastTradeOpenTime) < Min_Minutes_Between_Trades * 60)
+      return false;
+
+   return true;
+}
+
 //+------------------------------------------------------------------+
 //| MAIN ALGO                                            |
 //+------------------------------------------------------------------+
@@ -270,13 +356,15 @@ void OnTick()
       RefreshRates();
       double Ichimoku_SL_value = Ichimoku_SL_SELL();
       if(Ichimoku_SL_value > 0.0 && canOpen_Spread()){
-      OrderSend(Symbol(), OP_SELL, Lot_Size, Bid, Slippage,NormalizeDouble((Ichimoku_SL_value),Digits()), NormalizeDouble(0,Digits()), Trade_Comment, Trade_Reference, 0, Yellow);
+      double lotToUse = CalculateOrderLots();
+      int ticket = OrderSend(Symbol(), OP_SELL, lotToUse, Bid, Slippage,NormalizeDouble((Ichimoku_SL_value),Digits()), NormalizeDouble(0,Digits()), Trade_Comment, Trade_Reference, 0, Yellow);
 
-      if (OrderTicket() > 0)
+      if (ticket > 0)
       {    
           Print("Short Sleep Well opened : ", OrderOpenPrice());
           FREEDOM = true;
           IsNewM1Candle = false;
+          lastTradeOpenTime = TimeCurrent();
       }
       else
       {
@@ -312,13 +400,15 @@ bool openLongRC_RSI() {
     RefreshRates();
     double Ichimoku_SL_value = Ichimoku_SL_BUY();
     if(Ichimoku_SL_value > 0.0 && canOpen_Spread()){
-    OrderSend(Symbol(), OP_BUY, Lot_Size, Ask, Slippage, NormalizeDouble((Ichimoku_SL_value),Digits()), NormalizeDouble(0,Digits()), Trade_Comment, Trade_Reference, 0, Green);
+    double lotToUse = CalculateOrderLots();
+    int ticket = OrderSend(Symbol(), OP_BUY, lotToUse, Ask, Slippage, NormalizeDouble((Ichimoku_SL_value),Digits()), NormalizeDouble(0,Digits()), Trade_Comment, Trade_Reference, 0, Green);
 
-    if (OrderTicket() > 0)
+    if (ticket > 0)
     {
         Print("Long Sleep Well opened : ", OrderOpenPrice());
         FREEDOM = true;
         IsNewM1Candle = false;
+        lastTradeOpenTime = TimeCurrent();
     }
     else
     {
@@ -461,7 +551,7 @@ bool closeAllWolfsWithHG() {
                continue;
             }
             int orderMagicNumber = OrderMagicNumber();
-            if(orderMagicNumber == Trade_Reference || OrderComment() == ""){         
+            if(orderMagicNumber == Trade_Reference){         
               if(OrderSymbol() == Symbol()) {
                    if(OrderType() == OP_SELL){                        
                       if (OrderClose(OrderTicket(), OrderLots(), Ask, Slippage, Blue)){
@@ -495,7 +585,7 @@ bool closeAllWolfsWithHG() {
             }
             if (OrderSymbol() == Symbol()){
             int orderMagicNumber = OrderMagicNumber();
-            if(orderMagicNumber == Trade_Reference || OrderComment() == ""){
+            if(orderMagicNumber == Trade_Reference){
                wolfs++;
             }
             }
@@ -685,7 +775,7 @@ if(totalTrades != 0){
             if (OrderSymbol() == Symbol())
             {
                int magicNr = OrderMagicNumber();
-               if (magicNr == Trade_Reference || OrderComment() == "")
+               if (magicNr == Trade_Reference)
                {
                int valuePositive = 1;
                    amountOfTrades = amountOfTrades + valuePositive;
@@ -712,7 +802,7 @@ if(totalTrades != 0){
             if (OrderSymbol() == Symbol())
             {
                int magicNr = OrderMagicNumber();
-               if (magicNr == Trade_Reference || OrderComment() == "")
+               if (magicNr == Trade_Reference)
                {
                   if (OrderType() == OP_BUY)
                   {
@@ -746,7 +836,7 @@ if(totalTrades != 0){
             if (OrderSymbol() == Symbol())
             {
                int magicNr = OrderMagicNumber();
-               if (magicNr == Trade_Reference || OrderComment() == "")
+               if (magicNr == Trade_Reference)
                {
                   if (OrderType() == OP_SELL)
                   {
