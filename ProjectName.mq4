@@ -70,6 +70,10 @@ input bool RatioATRCheck = true;
 input double M1_ATR5vsATR14 = 1.00;
 input double M15_ATR5vsATR14 = 1.05;
 bool OneCandleOnly = true;
+input bool Activated_below = true;
+input int Max_Consecutive_Losses = 3;
+input int Cooldown_After_Loss_Minutes = 30;
+input int Min_Minutes_Between_Trades = 5;
 
 
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -191,7 +195,7 @@ void OnTick()
       }
       else
       {
-            if (CanOpen && CanOpenNewTrade())
+            if (CanOpen && (Activated_below && CanOpenNewTrade()))
             {
                if (isFastLong_RSI())
                {
