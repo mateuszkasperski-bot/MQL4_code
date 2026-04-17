@@ -192,7 +192,7 @@ void OnTick()
       }
       else
       {
-            if (CanOpen && (Activated_below && CanOpenNewTrade()))
+            if (CanOpen && (!Activated_below || CanOpenNewTrade()))
             {
                if (isFastLong_RSI())
                {
