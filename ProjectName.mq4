@@ -29,9 +29,6 @@ input double Lot_Size = 1;
 input double ATR_SL = 0.75;
 input double ATR_TP = 1.75;
 input double Max_SL = 10000;
-input int Max_Consecutive_Losses = 3;
-input int Cooldown_After_Loss_Minutes = 30;
-input int Min_Minutes_Between_Trades = 5;
 
 bool CanOpen = true;
 
